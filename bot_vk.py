@@ -156,6 +156,8 @@ def clean_md(text):
     text = re.sub(r'#{1,6}\s+', '', text)
     text = re.sub(r'`(.+?)`', r'\1', text)
     text = re.sub(r'_{1,2}(.+?)_{1,2}', r'\1', text)
+    # Убираем markdown-ссылки [текст](url) -> просто текст
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -199,7 +201,9 @@ def ask_with_rag(uid, question):
     elif max_score >= THRESHOLD_RELATED:
         # РЕЖИМ 2: по теме АПК, нет в документах
         system = SYSTEM_MODE2
-        user_msg = question
+        # Принудительно начинаем с предупреждения
+        disclaimer = "📚 В моей базе документов по этому вопросу информации нет, отвечаю из общих знаний об АПК:"
+        user_msg = f"Начни ответ ТОЧНО с этой фразы без изменений: {disclaimer}\n\nЗатем подробно ответь: {question}"
         max_tok = 1000
         log.info(f"[{uid}] → РЕЖИМ 2 (общие знания АПК)")
 
