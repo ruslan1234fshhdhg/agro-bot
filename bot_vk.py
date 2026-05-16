@@ -1,15 +1,16 @@
 """
 bot_vk.py — ВКонтакте бот «АгроПомощник»
-Три режима:
-  РЕЖИМ 1 (score >= 0.08) — ответ строго по документам, подробно
-  РЕЖИМ 2 (0.02 <= score < 0.08) — тема АПК, но нет в файлах — из общих знаний
-  РЕЖИМ 3 (score < 0.02) — не по теме бота — кратко и сухо
+Три режима без check_relevance:
+  РЕЖИМ 1 (score >= 0.12) — ответ строго по документам
+  РЕЖИМ 2 (score >= 0.015) — по теме АПК, из общих знаний с предупреждением
+  РЕЖИМ 3 (score < 0.015) — не по теме, кратко
 """
 import os, logging, re, math, pickle, requests, json
-from pathlib import Path
+import json as _json, time as _time
+from pathlib import Path as _Path
 
 # ── Загрузка .env ─────────────────────────────────────────────────────
-env_path = Path(__file__).parent / ".env"
+env_path = Path(_Path(__file__).parent / ".env") if False else _Path(__file__).parent / ".env"
 if env_path.exists():
     for line in env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -31,9 +32,6 @@ VK_API_URL  = "https://api.vk.com/method/"
 VK_API_VER  = "5.199"
 
 # ── Защита от дублей ──────────────────────────────────────────────────
-import json as _json, time as _time
-from pathlib import Path as _Path
-
 _IDS_FILE = _Path("/tmp/processed_ids.json")
 
 def _load_ids():
@@ -50,14 +48,14 @@ def _save_ids(d):
     try: _IDS_FILE.write_text(_json.dumps(d))
     except: pass
 
-processed_ids = _load_ids()  # {str(msg_id): timestamp} — сохраняется между перезапусками
+processed_ids = _load_ids()
 
 # ── TF-IDF индекс ─────────────────────────────────────────────────────
 INDEX = {"chunks": [], "vectors": [], "doc_freq": {}, "N": 0}
 
 def load_index():
     global INDEX
-    p = Path("knowledge_index.pkl")
+    p = _Path("knowledge_index.pkl")
     if p.exists():
         with open(p, "rb") as f:
             INDEX = pickle.load(f)
@@ -65,25 +63,22 @@ def load_index():
     else:
         log.warning("knowledge_index.pkl не найден")
 
-# Стоп-слова — служебные слова которые дают ложные совпадения
+# Стоп-слова — убираем слова дающие ложные совпадения
 STOPWORDS = {
-    'кто','что','как','это','все','для','при','или','они','она','оно',
-    'его','её','нет','был','быть','есть','вот','так','уже','еще','ещё',
-    'там','тут','где','без','над','под','про','вам','вас','нас','мне',
-    'мне','вам','её','его','том','эти','эта','этот','эту','ним','них',
-    'той','тот','ту','три','два','раз','лет','год','мне','ещё','кого',
-    'чем','тем','тех','тому','того','всё','всех','всем','наш','ваш',
-    'can','the','and','for','not','you','are','but','was','его','ней',
+    'кто','что','как','это','все','для','при','или','они','она','оно','нет','был',
+    'быть','есть','вот','так','уже','еще','ещё','там','тут','где','без','над',
+    'под','про','вам','вас','нас','мне','том','эти','эта','этот','эту','ним',
+    'них','той','тот','три','два','раз','лет','год','кого','чем','тем','тех',
+    'тому','того','всё','всех','всем','наш','ваш','can','the','and','for',
+    'not','you','are','but','was','ней','ооо','зао','оао','пао',
 }
 
 def tokenize(text):
-    words = re.findall(r'[а-яёa-z]{3,}', text.lower())
-    return [w for w in words if w not in STOPWORDS]
+    return [w for w in re.findall(r'[а-яёa-z]{3,}', text.lower()) if w not in STOPWORDS]
 
-# ── Три порога для трёх режимов ───────────────────────────────────────
-THRESHOLD_DOCS    = 0.12   # score >= 0.08 → РЕЖИМ 1: в документах
-THRESHOLD_RELATED = 0.015   # score >= 0.02 → РЕЖИМ 2: по теме, но не в файлах
-                            # score <  0.02 → РЕЖИМ 3: не по теме
+# ── Пороги трёх режимов ───────────────────────────────────────────────
+THRESHOLD_DOCS    = 0.12   # >= 0.12 → в документах
+THRESHOLD_RELATED = 0.015  # >= 0.015 → по теме АПК
 
 def search_kb(query, n=6):
     if not INDEX["chunks"]: return [], 0.0
@@ -92,8 +87,7 @@ def search_kb(query, n=6):
     N = INDEX["N"] or 1
     df = INDEX["doc_freq"]
     tf = {}
-    for w in words:
-        tf[w] = tf.get(w, 0) + 1
+    for w in words: tf[w] = tf.get(w, 0) + 1
     qvec = {w: (c/len(words)) * math.log(N/df[w])
             for w, c in tf.items() if w in df and df[w] > 0}
     if not qvec: return [], 0.0
@@ -110,59 +104,53 @@ def search_kb(query, n=6):
     if not scored: return [], 0.0
     return [INDEX["chunks"][i] for _, i in scored[:n]], scored[0][0]
 
-# ── Промпты для трёх режимов ──────────────────────────────────────────
-SYSTEM_MODE1 = """Ты — АгроПомощник, эксперт по сельскому хозяйству и цифровой трансформации АПК России.
+# ── Промпты ───────────────────────────────────────────────────────────
+SYSTEM_MODE1 = """Ты — АгроПомощник, эксперт по АПК России.
 
-Тебе передан контекст из официальных документов. Пользователь спросил о том, что ЕСТЬ в документах.
+Тебе дан контекст из официальных документов. Отвечай подробно на его основе.
 
 Правила:
-— Отвечай подробно и развёрнуто — пользователь ждёт экспертного ответа
-— Используй всю конкретику из контекста: цифры, названия программ, подсистем, сроки, суммы
-— Структурируй с эмодзи: 📌 главная мысль, ✅ каждый пункт, 💡 важный совет, 📎 источник
-— НЕ используй markdown (**, ##, __)
+— Используй конкретику из контекста: цифры, названия программ, подсистем, ставки
+— Структура: 📌 главное, ✅ пункты, 💡 совет, 📎 источник
+— В конце ОБЯЗАТЕЛЬНО укажи источник через 📎
+— Не используй ** ## __ (никакого markdown)
 — Каждый блок отделяй пустой строкой
-— В конце ОБЯЗАТЕЛЬНО: 📎 Источник: [название документа]
-— НЕ повторяй одно и то же дважды"""
+— Отвечай только один раз, без повторений"""
 
-SYSTEM_MODE2 = """Ты — АгроПомощник, эксперт по сельскому хозяйству и цифровой трансформации АПК России.
+SYSTEM_MODE2 = """Ты — АгроПомощник, эксперт по АПК России.
 
-Пользователь задал вопрос по теме АПК или смежным темам, но в базе документов точного ответа нет.
-
-ВАЖНО: Первые два слова твоего ответа ОБЯЗАТЕЛЬНО должны быть: "📚 В моей базе документов по этому вопросу информации нет, отвечаю из общих знаний об АПК:"
-Без этого предупреждения ответ недействителен.
+В базе документов по этому вопросу нет точной информации.
 
 Правила:
-— После предупреждения дай подробный и полезный ответ
-— Используй эмодзи: 📌 главное, ✅ пункты, 💡 совет
-— НЕ используй markdown (**, ##, __)
-— В конце добавь: "💡 Для точных данных: mcx.gov.ru или региональный Минсельхоз"
-— НЕ повторяй одно и то же дважды"""
+— Начни СТРОГО с фразы: "📚 В моей базе документов по этому вопросу информации нет, отвечаю из общих знаний об АПК:"
+— После — подробный полезный ответ из общих знаний
+— Структура: 📌 главное, ✅ пункты, 💡 совет
+— В конце: "💡 Для точных данных: mcx.gov.ru или региональный Минсельхоз"
+— Не используй ** ## __
+— Отвечай только один раз, без повторений"""
 
-SYSTEM_MODE3 = """Ты — АгроПомощник, помощник по вопросам АПК и цифровой трансформации сельского хозяйства России.
+SYSTEM_MODE3 = """Ты — АгроПомощник. Специализируешься на вопросах АПК и цифровой трансформации сельского хозяйства России.
 
-Пользователь задал вопрос, который НЕ относится к сельскому хозяйству, АПК или смежным темам.
+Пользователь задал вопрос не по теме.
 
 Правила:
-— Отвечай коротко и по делу, без лишних слов
-— ПЕРВАЯ строка: "🤖 Этот вопрос не по моей теме."
-— Одним предложением объясни чем ты занимаешься
-— Одним предложением подскажи куда обратиться по этому вопросу
-— Всё — больше ничего не добавляй, не давай советов по теме вопроса
-— НЕ используй markdown"""
+— Начни с: "🤖 Этот вопрос не по моей теме."
+— Одним предложением: чем ты занимаешься
+— Одним предложением: куда обратиться по этому вопросу
+— ВСЁ. Больше ничего не добавляй.
+— Не используй ** ## __"""
 
 # ── История диалогов ──────────────────────────────────────────────────
 user_history = {}
 
-def get_history(uid):
-    return user_history.setdefault(uid, [])
+def get_history(uid): return user_history.setdefault(uid, [])
 
 def trim_history(uid):
     h = get_history(uid)
-    if len(h) > 12:
-        user_history[uid] = h[-12:]
+    if len(h) > 12: user_history[uid] = h[-12:]
 
 # ── Очистка markdown ──────────────────────────────────────────────────
-def clean_markdown(text):
+def clean_md(text):
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'\*(.+?)\*', r'\1', text)
     text = re.sub(r'#{1,6}\s+', '', text)
@@ -171,7 +159,7 @@ def clean_markdown(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-# ── Polza.ai запрос ───────────────────────────────────────────────────
+# ── Polza.ai ──────────────────────────────────────────────────────────
 def call_polza(system, messages, max_tokens=1000):
     headers = {"Authorization": f"Bearer {POLZA_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -189,78 +177,45 @@ def call_polza(system, messages, max_tokens=1000):
         raise Exception(data["error"].get("message", str(data["error"])))
     return data["choices"][0]["message"]["content"]
 
-# ── Проверка реальной релевантности чанков ───────────────────────────
-def check_relevance(question, context_text):
-    """Проверяет — реально ли контекст из документов помогает ответить на вопрос."""
-    prompt = (
-        f'Вопрос пользователя: "{question}"\n\n'
-        f'Отрывок из документа:\n{context_text[:1000]}\n\n'
-        'Содержит ли этот отрывок информацию относящуюся к теме вопроса?\n'
-        'Напиши только: ДА или НЕТ'
-    )
-    try:
-        result = call_polza(
-            "Отвечай только словом ДА или НЕТ.",
-            [{"role": "user", "content": prompt}],
-            max_tokens=5
-        )
-        answer = result.strip().upper()
-        log.info(f"check_relevance -> '{answer}'")
-        # Считаем нерелевантным только при явном НЕТ
-        return "НЕТ" not in answer
-    except Exception as e:
-        log.error(f"check_relevance error: {e}")
-        return True
-
-# ── Основная функция RAG ──────────────────────────────────────────────
+# ── RAG: три режима без check_relevance ───────────────────────────────
 def ask_with_rag(uid, question):
     chunks, max_score = search_kb(question)
-
     history = get_history(uid)
     recent = history[-6:] if len(history) > 6 else history[:]
 
+    log.info(f"[{uid}] score={max_score:.4f} | вопрос: {question[:50]}")
+
     if max_score >= THRESHOLD_DOCS:
-        # Предварительная проверка — реально ли чанки отвечают на вопрос
+        # РЕЖИМ 1: есть в документах
         parts = []
         for c in chunks:
-            parts.append(f"[{c['source']}]:\n{c['text'][:600]}")
+            parts.append(f"[{c['source']}]:\n{c['text'][:700]}")
         context = "\n\n".join(parts)
-        
-        is_relevant = check_relevance(question, context)
-        
-        if is_relevant:
-            # РЕЖИМ 1: ответ по документам
-            system = SYSTEM_MODE1
-            user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС: {question}"
-            max_tokens = 1200
-            log.info(f"[{uid}] score={max_score:.3f} → РЕЖИМ 1 (документы, релевантно)")
-        else:
-            # Score высокий, но контекст не по теме — переходим в Режим 2
-            system = SYSTEM_MODE2
-            user_msg = question
-            max_tokens = 1000
-            log.info(f"[{uid}] score={max_score:.3f} → РЕЖИМ 2 (score высокий, но нерелевантно)")
+        system = SYSTEM_MODE1
+        user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС: {question}"
+        max_tok = 1200
+        log.info(f"[{uid}] → РЕЖИМ 1 (документы)")
 
     elif max_score >= THRESHOLD_RELATED:
-        # РЕЖИМ 2: по теме АПК, но не в файлах
+        # РЕЖИМ 2: по теме АПК, нет в документах
         system = SYSTEM_MODE2
         user_msg = question
-        max_tokens = 1000
-        log.info(f"[{uid}] score={max_score:.3f} → РЕЖИМ 2 (общие знания АПК)")
+        max_tok = 1000
+        log.info(f"[{uid}] → РЕЖИМ 2 (общие знания АПК)")
 
     else:
         # РЕЖИМ 3: не по теме
         system = SYSTEM_MODE3
         user_msg = question
-        max_tokens = 300
-        log.info(f"[{uid}] score={max_score:.3f} → РЕЖИМ 3 (не по теме)")
+        max_tok = 200
+        log.info(f"[{uid}] → РЕЖИМ 3 (не по теме)")
 
     history.append({"role": "user", "content": user_msg})
     trim_history(uid)
 
     try:
-        answer = call_polza(system, recent + [{"role": "user", "content": user_msg}], max_tokens)
-        answer = clean_markdown(answer)
+        answer = call_polza(system, recent + [{"role": "user", "content": user_msg}], max_tok)
+        answer = clean_md(answer)
         history.append({"role": "assistant", "content": answer})
         return answer
     except Exception as e:
@@ -280,7 +235,7 @@ def vk_send(user_id, text):
             "access_token": VK_TOKEN, "v": VK_API_VER,
         }
         resp = requests.post(VK_API_URL + "messages.send", data=params, timeout=10)
-        log.info(f"VK send to {user_id}: {resp.status_code}")
+        log.info(f"VK send {user_id}: {resp.status_code}")
 
 def vk_send_keyboard(user_id, text):
     import random
@@ -306,14 +261,15 @@ def vk_send_keyboard(user_id, text):
     }
     requests.post(VK_API_URL + "messages.send", data=params, timeout=10)
 
+# ── Быстрые кнопки ────────────────────────────────────────────────────
 QUICK_Q = {
-    "🌾 Зерновод":          "Я зерновой фермер. Какие меры государственной поддержки и цифровые инструменты для меня предусмотрены?",
+    "🌾 Зерновод":          "Я зерновой фермер. Какие меры государственной поддержки и цифровые инструменты для меня предусмотрены в документах АПК?",
     "🐄 Животноводство":    "Занимаюсь животноводством. Какая господдержка и цифровые системы для меня доступны?",
-    "🎣 Рыболовство":       "Занимаюсь рыболовством как бизнесом. Какие цифровые инструменты и меры поддержки актуальны для рыбохозяйственного комплекса?",
+    "🎣 Рыболовство":       "Занимаюсь рыболовством. Какие цифровые инструменты и меры поддержки предусмотрены в нормативных документах?",
     "🌱 Овощеводство":      "Занимаюсь овощеводством. Какие субсидии, гранты и программы мне доступны?",
-    "💰 Гранты и субсидии": "Какие виды грантов и субсидий существуют для агробизнеса? Как работает подсистема Гранты МФХ в АИС Субсидии АПК?",
+    "💰 Гранты и субсидии": "Какие виды грантов и субсидий АПК существуют? Расскажи про подсистему Гранты МФХ в АИС Субсидии АПК.",
     "📱 Цифровизация АПК":  "Какие цифровые технологии внедряются в АПК согласно стратегии 3309-р? Что такое единая цифровая платформа АПК?",
-    "🏦 Льготные кредиты":  "Как работает льготное кредитование сельхозтоваропроизводителей? Какие ставки, условия и подсистемы АИС это обеспечивают?",
+    "🏦 Льготные кредиты":  "Расскажи про подсистему льготного кредитования в АИС Субсидии АПК. Какие виды льготных кредитов предусмотрены?",
     "📊 Стратегия до 2030":  "Расскажи подробно об основных задачах, индикаторах и дорожной карте Стратегии цифровой трансформации АПК до 2030.",
 }
 
@@ -333,7 +289,7 @@ WELCOME = (
 # ── Обработка сообщений ───────────────────────────────────────────────
 def handle_message(user_id, text):
     text = text.strip()
-    if text.lower() in ["начать", "старт", "start", "/start", "привет", "hello", "🔄 начать заново"]:
+    if text.lower() in ["начать","старт","start","/start","привет","hello","🔄 начать заново"]:
         user_history.pop(user_id, None)
         vk_send_keyboard(user_id, WELCOME)
         return
@@ -366,26 +322,22 @@ def vk_webhook():
         user_id = msg.get("from_id")
         text = msg.get("text", "").strip()
         msg_id = msg.get("id", 0)
-        msg_date = msg.get("date", 0)  # unix timestamp сообщения
+        msg_date = msg.get("date", 0)
 
-        # Защита 1: фильтр по времени — игнорируем сообщения старше 30 секунд
-        import time
-        now = int(time.time())
+        # Фильтр старых сообщений (60 сек)
+        now = int(_time.time())
         if msg_date and (now - msg_date) > 60:
-            log.info(f"Старое сообщение {msg_id} (возраст {now - msg_date}с) — пропускаем")
+            log.info(f"Старое сообщение (возраст {now-msg_date}с) — пропускаем")
             return "ok", 200
 
-        # Защита 2: дедупликация по message_id (хранится в файле между перезапусками)
+        # Дедупликация
         msg_id_str = str(msg_id)
         if msg_id and msg_id_str in processed_ids:
             log.info(f"Дубль {msg_id} — пропускаем")
             return "ok", 200
         if msg_id:
-            import time as _t
-            processed_ids[msg_id_str] = _t.time()
-            # Чистим старые (старше 2 часов) и сохраняем
-            now_t = _t.time()
-            cleaned = {k: v for k, v in processed_ids.items() if now_t - v < 7200}
+            processed_ids[msg_id_str] = _time.time()
+            cleaned = {k: v for k, v in processed_ids.items() if _time.time() - v < 7200}
             processed_ids.clear()
             processed_ids.update(cleaned)
             _save_ids(processed_ids)
