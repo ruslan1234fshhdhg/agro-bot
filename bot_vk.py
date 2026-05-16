@@ -1,10 +1,7 @@
 """
 bot_vk.py — ВКонтакте бот «АгроПомощник»
-Платформа: VK (vk.com)
-Поиск: TF-IDF по базе знаний из 3 PDF (RAG)
-ИИ:    Polza.ai — DeepSeek V3
 """
-import os, logging, re, math, pickle, requests, json, time
+import os, logging, re, math, pickle, requests, json
 from pathlib import Path
 
 # ── Загрузка .env ─────────────────────────────────────────────────────
@@ -16,10 +13,7 @@ if env_path.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
 VK_TOKEN    = os.environ.get("VK_TOKEN", "")
@@ -34,7 +28,7 @@ VK_API_URL  = "https://api.vk.com/method/"
 VK_API_VER  = "5.199"
 
 # ── Защита от дублей ──────────────────────────────────────────────────
-processed_ids = set()  # уже обработанные message_id
+processed_ids = set()
 
 # ── TF-IDF индекс ─────────────────────────────────────────────────────
 INDEX = {"chunks": [], "vectors": [], "doc_freq": {}, "N": 0}
@@ -80,31 +74,39 @@ def search_kb(query, n=4):
     return [INDEX["chunks"][i] for _, i in scored[:n]], scored[0][0]
 
 # ── Промпты ───────────────────────────────────────────────────────────
-SYSTEM_WITH_DOCS = """Ты — АгроПомощник, помощник для сельскохозяйственных предпринимателей России.
+SYSTEM_WITH_DOCS = """Ты — АгроПомощник, умный помощник для сельскохозяйственных предпринимателей России.
 
-База знаний — три официальных документа:
-1. Распоряжение Правительства РФ № 3309-р — Стратегия цифровой трансформации АПК до 2030
-2. Монография «Цифровая трансформация АПК» (Худякова Е.В., 2022)
-3. Нормативные документы Минсельхоза РФ (АИС Субсидии АПК)
+Тебе предоставлен контекст из официальных документов АПК. Отвечай строго по нему.
 
-Правила ответа:
-- Отвечай на основе КОНТЕКСТА из документов
-- Пиши простым разговорным языком без markdown-форматирования
-- Не используй символы **, ## и другое форматирование
-- Указывай источник в скобках: (Документ 1), (Документ 2) или (Документ 3)
-- Структура: сначала главное, потом детали, в конце — что делать дальше
-- Кратко и по делу"""
+Правила оформления ответа:
+— Пиши живым, простым языком
+— Используй эмодзи для структуры: 📌 для главного, ✅ для пунктов, 💡 для совета, 📎 для источника
+— НЕ используй markdown: никаких **, ##, __, ---
+— Каждый смысловой блок отделяй пустой строкой
+— В конце всегда пиши источник через 📎
+— Один чёткий ответ, без повторений
+— Максимум 6-8 предложений"""
 
-SYSTEM_NO_DOCS = """Ты — АгроПомощник, помощник для сельскохозяйственных предпринимателей России.
+SYSTEM_NO_DOCS = """Ты — АгроПомощник, умный помощник для сельскохозяйственных предпринимателей России.
 
-По этому вопросу информации в базе знаний нет. 
+По этому вопросу в базе документов ничего не найдено. Действуй по одному из двух сценариев:
 
-Правила ответа:
-- Начни с: "В моей базе знаний по этому вопросу информации нет, но вот что могу сказать:"
-- Если вопрос совсем не по теме АПК — вежливо объясни что ты специализируешься на сельском хозяйстве
-- Если вопрос близок к АПК — дай полезный ответ из общих знаний
-- В конце добавь: "Для точной информации рекомендую: mcx.gov.ru"
-- Пиши простым языком без markdown-форматирования, без символов ** и ##"""
+СЦЕНАРИЙ А — вопрос близок к АПК (фермерство, урожай, животные, рыбалка как бизнес, субсидии, техника и т.д.):
+Начни с: "📚 В моей базе документов по этому вопросу ничего нет, но из общих знаний могу сказать:"
+Затем дай краткий полезный ответ (3-5 предложений) с эмодзи для структуры.
+В конце: "💡 Для точной информации советую: mcx.gov.ru"
+
+СЦЕНАРИЙ Б — вопрос совсем не по теме (покупки, кино, погода, удочки для рыбалки и т.д.):
+Начни с: "😊 Это немного не по моей части —"
+Одним предложением объясни что ты про АПК и цифровизацию сельского хозяйства.
+Дай один короткий дружелюбный совет куда обратиться (2 предложения максимум).
+НЕ давай развёрнутых советов по теме вне АПК.
+
+Правила оформления:
+— Живой простой язык
+— Эмодзи для структуры
+— Никаких **, ##, __, markdown
+— Один ответ, без повторений"""
 
 # ── История диалогов ──────────────────────────────────────────────────
 user_history = {}
@@ -117,26 +119,24 @@ def trim_history(uid):
     if len(h) > 10:
         user_history[uid] = h[-10:]
 
-# ── Polza.ai ──────────────────────────────────────────────────────────
+# ── Очистка markdown ──────────────────────────────────────────────────
 def clean_markdown(text):
-    """Убирает markdown форматирование для VK."""
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)   # **жирный**
-    text = re.sub(r'\*(.+?)\*', r'\1', text)         # *курсив*
-    text = re.sub(r'#{1,6}\s+', '', text)             # ## заголовки
-    text = re.sub(r'`(.+?)`', r'\1', text)            # `код`
-    text = re.sub(r'\n{3,}', '\n\n', text)            # лишние переносы
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'#{1,6}\s+', '', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    text = re.sub(r'_{1,2}(.+?)_{1,2}', r'\1', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
+# ── Polza.ai ──────────────────────────────────────────────────────────
 def call_polza(system, messages):
-    headers = {
-        "Authorization": f"Bearer {POLZA_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {POLZA_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": POLZA_MODEL,
         "messages": [{"role": "system", "content": system}] + messages,
-        "max_tokens": 800,
-        "temperature": 0.3,
+        "max_tokens": 700,
+        "temperature": 0.4,
     }
     resp = requests.post(POLZA_URL, headers=headers, json=payload, timeout=60)
     if not resp.ok:
@@ -154,17 +154,19 @@ def ask_with_rag(uid, question):
     if docs_found:
         parts = []
         for c in chunks:
-            label = {"strategy": "Документ 1", "monograph": "Документ 2",
-                     "normative": "Документ 3"}.get(c["doc_id"], c["doc_id"])
-            parts.append(f"[{label}]: {c['text'][:400]}")
+            label = {"strategy": "Документ 1 (Стратегия ЦТ АПК)",
+                     "monograph": "Документ 2 (Монография Худяковой)",
+                     "normative": "Документ 3 (НД Минсельхоза)"
+                     }.get(c["doc_id"], c["doc_id"])
+            parts.append(f"[{label}]:\n{c['text'][:400]}")
         context = "\n\n".join(parts)
         system = SYSTEM_WITH_DOCS
-        user_msg = f"КОНТЕКСТ:\n{context}\n\nВОПРОС: {question}"
+        user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС ПОЛЬЗОВАТЕЛЯ: {question}"
         log.info(f"[{uid}] score={max_score:.3f} -> ДОКУМЕНТЫ")
     else:
         system = SYSTEM_NO_DOCS
         user_msg = question
-        log.info(f"[{uid}] score={max_score:.3f} -> ОБЩИЕ ЗНАНИЯ")
+        log.info(f"[{uid}] score={max_score:.3f} -> ОБЩИЕ ЗНАНИЯ / ОФФТОП")
 
     history = get_history(uid)
     recent = history[-6:] if len(history) > 6 else history[:]
@@ -179,15 +181,14 @@ def ask_with_rag(uid, question):
     except Exception as e:
         err = str(e)
         log.error(f"Polza error: {err}")
-        if "402" in err: return "Ошибка: недостаточно средств на Polza.ai."
-        if "401" in err: return "Ошибка: неверный API ключ."
-        return "Произошла ошибка, попробуйте снова."
+        if "402" in err: return "⚠️ Ошибка: недостаточно средств на Polza.ai."
+        if "401" in err: return "⚠️ Ошибка: неверный API ключ."
+        return "⚠️ Произошла ошибка, попробуйте снова."
 
 # ── VK API ────────────────────────────────────────────────────────────
 def vk_send(user_id, text):
     import random
-    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
-    for chunk in chunks:
+    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
         params = {
             "user_id": user_id,
             "message": chunk,
@@ -195,8 +196,7 @@ def vk_send(user_id, text):
             "access_token": VK_TOKEN,
             "v": VK_API_VER,
         }
-        resp = requests.post(VK_API_URL + "messages.send", data=params, timeout=10)
-        log.info(f"VK send to {user_id}: {resp.status_code}")
+        requests.post(VK_API_URL + "messages.send", data=params, timeout=10)
 
 def vk_send_keyboard(user_id, text):
     import random
@@ -220,7 +220,7 @@ def vk_send_keyboard(user_id, text):
                 {"action": {"type": "text", "label": "📊 Стратегия до 2030"}, "color": "primary"},
             ],
             [
-                {"action": {"type": "text", "label": "🔄 Сбросить историю"}, "color": "secondary"},
+                {"action": {"type": "text", "label": "🔄 Начать заново"}, "color": "secondary"},
             ],
         ]
     }
@@ -232,46 +232,41 @@ def vk_send_keyboard(user_id, text):
         "access_token": VK_TOKEN,
         "v": VK_API_VER,
     }
-    resp = requests.post(VK_API_URL + "messages.send", data=params, timeout=10)
-    log.info(f"VK send keyboard to {user_id}: {resp.status_code}")
+    requests.post(VK_API_URL + "messages.send", data=params, timeout=10)
 
 # ── Быстрые кнопки ────────────────────────────────────────────────────
 QUICK_Q = {
     "🌾 Зерновод":         "Я зерновой фермер. Какие меры государственной поддержки и цифровые инструменты для меня предусмотрены?",
     "🐄 Животноводство":   "Занимаюсь животноводством. Какая поддержка и цифровые системы для меня доступны?",
-    "🎣 Рыболовство":      "Занимаюсь рыболовством. Какие цифровые инструменты и меры поддержки актуальны?",
+    "🎣 Рыболовство":      "Занимаюсь рыболовством как бизнесом. Какие цифровые инструменты и меры поддержки актуальны?",
     "🌱 Овощеводство":     "Занимаюсь овощеводством. Какие субсидии, гранты и программы мне доступны?",
-    "💰 Гранты и субсидии":"Хочу получить грант. Какие виды грантов существуют, как работает подсистема Гранты МФХ?",
-    "📱 Цифровизация АПК": "Какие цифровые технологии внедряются в АПК согласно стратегии 3309-р?",
-    "🏦 Льготные кредиты": "Как работает льготное кредитование сельхозтоваропроизводителей?",
-    "📊 Стратегия до 2030":"Расскажи об основных задачах и индикаторах Стратегического направления ЦТ АПК до 2030.",
+    "💰 Гранты и субсидии":"Хочу получить грант для агробизнеса. Какие виды грантов существуют и как работает подсистема Гранты МФХ?",
+    "📱 Цифровизация АПК": "Какие цифровые технологии внедряются в АПК согласно стратегии 3309-р? Что такое единая цифровая платформа?",
+    "🏦 Льготные кредиты": "Как работает льготное кредитование сельхозтоваропроизводителей? Какие ставки и условия?",
+    "📊 Стратегия до 2030": "Расскажи об основных задачах и индикаторах Стратегии цифровой трансформации АПК до 2030.",
 }
+
+WELCOME = (
+    "👋 Здравствуйте! Я АгроПомощник — система управления знаниями для агропредприятий России.\n\n"
+    "📚 Моя база знаний:\n"
+    "— Стратегия цифровой трансформации АПК до 2030 (Пост. Правительства № 3309-р)\n"
+    "— Монография «Цифровая трансформация АПК» (Худякова Е.В., 2022)\n"
+    "— Нормативные документы Минсельхоза РФ (АИС «Субсидии АПК»)\n\n"
+    "🤖 Как работаю: ищу ответ в документах → если нашёл, отвечаю по ним → если нет, предупреждаю и отвечаю из общих знаний.\n\n"
+    "Выберите тему или напишите вопрос 👇"
+)
 
 # ── Обработка сообщений ───────────────────────────────────────────────
 def handle_message(user_id, text):
     text = text.strip()
 
-    if text.lower() in ["начать", "старт", "start", "/start", "привет", "hello"]:
+    if text.lower() in ["начать", "старт", "start", "/start", "привет", "hello", "🔄 начать заново"]:
         user_history.pop(user_id, None)
-        vk_send_keyboard(user_id,
-            "Здравствуйте! Я АгроПомощник — система управления знаниями для агропредприятий.\n\n"
-            "База знаний (3 документа):\n"
-            "• Распоряжение Правительства РФ № 3309-р\n"
-            "• Монография Худяковой Е.В. (РГАУ-МСХА, 2022)\n"
-            "• НД Минсельхоза РФ (АИС «Субсидии АПК»)\n\n"
-            "Поиск: TF-IDF + DeepSeek V3\n\n"
-            "Выберите тему или напишите вопрос:"
-        )
-        return
-
-    if text in ["🔄 Сбросить историю", "сброс", "reset"]:
-        user_history.pop(user_id, None)
-        vk_send_keyboard(user_id, "История очищена. Задайте новый вопрос:")
+        vk_send_keyboard(user_id, WELCOME)
         return
 
     if text in QUICK_Q:
-        question = QUICK_Q[text]
-        answer = ask_with_rag(user_id, question)
+        answer = ask_with_rag(user_id, QUICK_Q[text])
         vk_send(user_id, answer)
         return
 
@@ -279,15 +274,14 @@ def handle_message(user_id, text):
     vk_send(user_id, answer)
 
 # ── Flask Webhook ─────────────────────────────────────────────────────
-from flask import Flask, request, jsonify
+from flask import Flask, request as flask_request
 
 app = Flask(__name__)
 
 @app.route("/vk_webhook", methods=["POST"])
 def vk_webhook():
-    data = request.get_json(silent=True) or {}
+    data = flask_request.get_json(silent=True) or {}
     event_type = data.get("type")
-    log.info(f"VK event: {event_type} from group {data.get('group_id')}")
 
     if event_type == "confirmation":
         return VK_CONFIRM, 200
@@ -303,29 +297,29 @@ def vk_webhook():
         msg_id = msg.get("id", 0)
 
         # Защита от дублей
-        if msg_id in processed_ids:
-            log.info(f"Дубль сообщения {msg_id} — пропускаем")
+        if msg_id and msg_id in processed_ids:
+            log.info(f"Дубль {msg_id} — пропускаем")
             return "ok", 200
-        processed_ids.add(msg_id)
 
-        # Очищаем старые ID (храним последние 1000)
-        if len(processed_ids) > 1000:
-            oldest = list(processed_ids)[:500]
-            for mid in oldest:
-                processed_ids.discard(mid)
+        if msg_id:
+            processed_ids.add(msg_id)
+            if len(processed_ids) > 1000:
+                old = list(processed_ids)[:500]
+                for m in old:
+                    processed_ids.discard(m)
 
         if user_id and text:
+            log.info(f"Сообщение от {user_id}: {text[:50]}")
             handle_message(user_id, text)
 
     return "ok", 200
 
 @app.route("/", methods=["GET"])
 def index():
-    return "АгроПомощник VK работает!", 200
+    return "АгроПомощник VK ✅", 200
 
-# ── Запуск ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     load_index()
     port = int(os.environ.get("PORT", 5000))
-    log.info(f"АгроПомощник VK запущен на порту {port}")
+    log.info(f"Запущен на порту {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
