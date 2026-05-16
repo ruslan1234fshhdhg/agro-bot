@@ -81,7 +81,7 @@ def tokenize(text):
     return [w for w in words if w not in STOPWORDS]
 
 # ── Три порога для трёх режимов ───────────────────────────────────────
-THRESHOLD_DOCS    = 0.08   # score >= 0.08 → РЕЖИМ 1: в документах
+THRESHOLD_DOCS    = 0.12   # score >= 0.08 → РЕЖИМ 1: в документах
 THRESHOLD_RELATED = 0.015   # score >= 0.02 → РЕЖИМ 2: по теме, но не в файлах
                             # score <  0.02 → РЕЖИМ 3: не по теме
 
@@ -193,21 +193,20 @@ def call_polza(system, messages, max_tokens=1000):
 def check_relevance(question, context_text):
     """Проверяет — реально ли контекст из документов помогает ответить на вопрос."""
     prompt = (
-        f'Вопрос: "{question}"\n\n'
-        f'Контекст из документов АПК:\n{context_text[:1200]}\n\n'
-        'Есть ли в контексте хоть какая-то полезная информация по теме вопроса?\n'
-        'Ответь только ДА или НЕТ.\n'
-        'ДА — если контекст касается темы вопроса (даже частично).\n'
-        'НЕТ — если контекст совершенно не связан с вопросом.'
+        f'Вопрос пользователя: "{question}"\n\n'
+        f'Отрывок из документа:\n{context_text[:1000]}\n\n'
+        'Содержит ли этот отрывок информацию относящуюся к теме вопроса?\n'
+        'Напиши только: ДА или НЕТ'
     )
     try:
         result = call_polza(
-            "Ты определяешь связь между вопросом и текстом. Отвечай только ДА или НЕТ.",
+            "Отвечай только словом ДА или НЕТ.",
             [{"role": "user", "content": prompt}],
             max_tokens=5
         )
         answer = result.strip().upper()
         log.info(f"check_relevance -> '{answer}'")
+        # Считаем нерелевантным только при явном НЕТ
         return "НЕТ" not in answer
     except Exception as e:
         log.error(f"check_relevance error: {e}")
