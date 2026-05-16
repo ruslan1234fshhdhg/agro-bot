@@ -46,9 +46,9 @@ def load_index():
 def tokenize(text):
     return re.findall(r'[а-яёa-z]+', text.lower())
 
-RELEVANCE_THRESHOLD = 0.05
+RELEVANCE_THRESHOLD = 0.02
 
-def search_kb(query, n=4):
+def search_kb(query, n=6):
     if not INDEX["chunks"]: return [], 0.0
     words = tokenize(query)
     if not words: return [], 0.0
@@ -85,7 +85,8 @@ SYSTEM_WITH_DOCS = """Ты — АгроПомощник, умный помощн
 — Каждый смысловой блок отделяй пустой строкой
 — В конце всегда пиши источник через 📎
 — Один чёткий ответ, без повторений
-— Максимум 6-8 предложений"""
+— Давай конкретику из документов: цифры, названия программ, подсистем, сроки
+— Один чёткий структурированный ответ, не скупись на полезные детали из контекста"""
 
 SYSTEM_NO_DOCS = """Ты — АгроПомощник, умный помощник для сельскохозяйственных предпринимателей России.
 
@@ -135,7 +136,7 @@ def call_polza(system, messages):
     payload = {
         "model": POLZA_MODEL,
         "messages": [{"role": "system", "content": system}] + messages,
-        "max_tokens": 700,
+        "max_tokens": 1000,
         "temperature": 0.4,
     }
     resp = requests.post(POLZA_URL, headers=headers, json=payload, timeout=60)
@@ -158,7 +159,7 @@ def ask_with_rag(uid, question):
                      "monograph": "Документ 2 (Монография Худяковой)",
                      "normative": "Документ 3 (НД Минсельхоза)"
                      }.get(c["doc_id"], c["doc_id"])
-            parts.append(f"[{label}]:\n{c['text'][:400]}")
+            parts.append(f"[{label}]:\n{c['text'][:600]}")
         context = "\n\n".join(parts)
         system = SYSTEM_WITH_DOCS
         user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС ПОЛЬЗОВАТЕЛЯ: {question}"
