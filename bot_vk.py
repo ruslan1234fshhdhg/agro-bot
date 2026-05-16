@@ -189,6 +189,25 @@ def call_polza(system, messages, max_tokens=1000):
         raise Exception(data["error"].get("message", str(data["error"])))
     return data["choices"][0]["message"]["content"]
 
+# ── Проверка реальной релевантности чанков ───────────────────────────
+def check_relevance(question, context_text):
+    """Быстрая проверка — реально ли контекст отвечает на вопрос."""
+    check_prompt = f"""Вопрос пользователя: "{question}"
+
+Найденный контекст из документов:
+{context_text[:800]}
+
+Ответь ТОЛЬКО одним словом:
+- "ДА" — если контекст содержит информацию, которая реально помогает ответить на вопрос
+- "НЕТ" — если контекст не по теме вопроса (совпали случайные слова, но смысл другой)"""
+    
+    try:
+        result = call_polza("Ты анализируешь релевантность текста.", 
+                           [{"role": "user", "content": check_prompt}], max_tokens=10)
+        return "ДА" in result.upper()
+    except:
+        return True  # при ошибке считаем релевантным
+
 # ── Основная функция RAG ──────────────────────────────────────────────
 def ask_with_rag(uid, question):
     chunks, max_score = search_kb(question)
@@ -197,15 +216,26 @@ def ask_with_rag(uid, question):
     recent = history[-6:] if len(history) > 6 else history[:]
 
     if max_score >= THRESHOLD_DOCS:
-        # РЕЖИМ 1: ответ по документам
+        # Предварительная проверка — реально ли чанки отвечают на вопрос
         parts = []
         for c in chunks:
             parts.append(f"[{c['source']}]:\n{c['text'][:600]}")
         context = "\n\n".join(parts)
-        system = SYSTEM_MODE1
-        user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС: {question}"
-        max_tokens = 1200
-        log.info(f"[{uid}] score={max_score:.3f} → РЕЖИМ 1 (документы)")
+        
+        is_relevant = check_relevance(question, context)
+        
+        if is_relevant:
+            # РЕЖИМ 1: ответ по документам
+            system = SYSTEM_MODE1
+            user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС: {question}"
+            max_tokens = 1200
+            log.info(f"[{uid}] score={max_score:.3f} → РЕЖИМ 1 (документы, релевантно)")
+        else:
+            # Score высокий, но контекст не по теме — переходим в Режим 2
+            system = SYSTEM_MODE2
+            user_msg = question
+            max_tokens = 1000
+            log.info(f"[{uid}] score={max_score:.3f} → РЕЖИМ 2 (score высокий, но нерелевантно)")
 
     elif max_score >= THRESHOLD_RELATED:
         # РЕЖИМ 2: по теме АПК, но не в файлах
