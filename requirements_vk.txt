@@ -1,0 +1,6 @@
+# VK бот
+flask>=3.0.0
+requests>=2.31.0
+
+# Индексирование PDF
+pdfplumber>=0.10.0
