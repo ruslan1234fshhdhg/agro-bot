@@ -1,7 +1,7 @@
 """
 bot_vk.py — ВКонтакте бот «АгроПомощник»
-Три режима без check_relevance:
-  РЕЖИМ 1 (score >= 0.12) — ответ строго по документам
+Три режима:
+  РЕЖИМ 1 (score >= 0.12) — строго по документам
   РЕЖИМ 2 (score >= 0.015) — по теме АПК, из общих знаний с предупреждением
   РЕЖИМ 3 (score < 0.015) — не по теме, кратко
 """
@@ -10,7 +10,7 @@ import json as _json, time as _time
 from pathlib import Path as _Path
 
 # ── Загрузка .env ─────────────────────────────────────────────────────
-env_path = Path(_Path(__file__).parent / ".env") if False else _Path(__file__).parent / ".env"
+env_path = _Path(__file__).parent / ".env"
 if env_path.exists():
     for line in env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -21,10 +21,10 @@ if env_path.exists():
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-VK_TOKEN    = os.environ.get("VK_TOKEN", "")
-VK_CONFIRM  = os.environ.get("VK_CONFIRM", "")
-POLZA_KEY   = os.environ.get("POLZA_API_KEY", "")
-SECRET      = os.environ.get("VK_SECRET", "")
+VK_TOKEN   = os.environ.get("VK_TOKEN", "")
+VK_CONFIRM = os.environ.get("VK_CONFIRM", "")
+POLZA_KEY  = os.environ.get("POLZA_API_KEY", "")
+SECRET     = os.environ.get("VK_SECRET", "")
 
 POLZA_URL   = "https://polza.ai/api/v1/chat/completions"
 POLZA_MODEL = "deepseek/deepseek-chat"
@@ -63,7 +63,6 @@ def load_index():
     else:
         log.warning("knowledge_index.pkl не найден")
 
-# Стоп-слова — убираем слова дающие ложные совпадения
 STOPWORDS = {
     'кто','что','как','это','все','для','при','или','они','она','оно','нет','был',
     'быть','есть','вот','так','уже','еще','ещё','там','тут','где','без','над',
@@ -74,11 +73,14 @@ STOPWORDS = {
 }
 
 def tokenize(text):
-    return [w for w in re.findall(r'[а-яёa-z]{3,}', text.lower()) if w not in STOPWORDS]
+    # Нормализуем опечатки
+    text = text.lower()
+    text = re.sub(r'(\w)а[йи]т', r'\1ает', text)  # "работаит" -> "работает"
+    text = re.sub(r'^што\b', 'что', text)
+    return [w for w in re.findall(r'[а-яёa-z]{3,}', text) if w not in STOPWORDS]
 
-# ── Пороги трёх режимов ───────────────────────────────────────────────
-THRESHOLD_DOCS    = 0.12   # >= 0.12 → в документах
-THRESHOLD_RELATED = 0.015  # >= 0.015 → по теме АПК
+THRESHOLD_DOCS    = 0.12
+THRESHOLD_RELATED = 0.015
 
 def search_kb(query, n=6):
     if not INDEX["chunks"]: return [], 0.0
@@ -105,40 +107,76 @@ def search_kb(query, n=6):
     return [INDEX["chunks"][i] for _, i in scored[:n]], scored[0][0]
 
 # ── Промпты ───────────────────────────────────────────────────────────
-SYSTEM_MODE1 = """Ты — АгроПомощник, эксперт по АПК России.
+SYSTEM_BASE = """ВАЖНО: Всегда отвечай ТОЛЬКО на русском языке. Никогда не используй украинский, английский или другие языки.
+Не используй markdown: никаких **, ##, __, [текст](ссылка).
+Каждый блок отделяй пустой строкой.
+Не повторяй один и тот же ответ дважды.
+"""
 
-Тебе дан контекст из официальных документов. Отвечай подробно на его основе.
-
-Правила:
-— Используй конкретику из контекста: цифры, названия программ, подсистем, ставки
-— Структура: 📌 главное, ✅ пункты, 💡 совет, 📎 источник
-— В конце ОБЯЗАТЕЛЬНО укажи источник через 📎
-— Не используй ** ## __ (никакого markdown)
-— Каждый блок отделяй пустой строкой
-— Отвечай только один раз, без повторений"""
-
-SYSTEM_MODE2 = """Ты — АгроПомощник, эксперт по АПК России.
-
-В базе документов по этому вопросу нет точной информации.
+SYSTEM_MODE1 = SYSTEM_BASE + """
+Ты — АгроПомощник, эксперт по АПК России.
+Тебе дан контекст из официальных документов. Отвечай ТОЛЬКО на основе этого контекста.
 
 Правила:
-— Начни СТРОГО с фразы: "📚 В моей базе документов по этому вопросу информации нет, отвечаю из общих знаний об АПК:"
-— После — подробный полезный ответ из общих знаний
+— Используй только факты из контекста: названия систем, функции, интеграции
+— НЕ выдумывай детали которых нет в контексте
+— Если в контексте нет точного ответа — скажи "в предоставленных документах эта информация не уточняется"
+— Структура: 📌 главное, ✅ пункты, 💡 совет, 📎 источник в конце
+— Отвечай один раз без повторений"""
+
+SYSTEM_MODE2 = SYSTEM_BASE + """
+Ты — АгроПомощник, эксперт по АПК России.
+В базе документов по этому вопросу точной информации нет.
+
+Правила:
+— ПЕРВОЕ ПРЕДЛОЖЕНИЕ всегда: "📚 В загруженных документах информация по этому вопросу отсутствует. Ниже приведена информация из общих знаний."
+— После — подробный полезный ответ
 — Структура: 📌 главное, ✅ пункты, 💡 совет
 — В конце: "💡 Для точных данных: mcx.gov.ru или региональный Минсельхоз"
-— Не используй ** ## __
-— Отвечай только один раз, без повторений"""
+— Отвечай один раз без повторений"""
 
-SYSTEM_MODE3 = """Ты — АгроПомощник. Специализируешься на вопросах АПК и цифровой трансформации сельского хозяйства России.
-
+SYSTEM_MODE3 = SYSTEM_BASE + """
+Ты — АгроПомощник. Специализируешься на вопросах АПК.
 Пользователь задал вопрос не по теме.
 
 Правила:
-— Начни с: "🤖 Этот вопрос не по моей теме."
-— Одним предложением: чем ты занимаешься
-— Одним предложением: куда обратиться по этому вопросу
-— ВСЁ. Больше ничего не добавляй.
-— Не используй ** ## __"""
+— Первая строка: "🤖 Этот вопрос не по моей теме."
+— Вторая строка: "В загруженных документах информации нет. Вопрос не относится к тематике АгроПомощника."
+— Третья строка: куда обратиться (одно предложение)
+— ВСЁ. Больше ничего."""
+
+SYSTEM_SECURITY = SYSTEM_BASE + """
+Ты — АгроПомощник. Специализируешься на вопросах АПК.
+Пользователь задаёт вопрос связанный с обходом законодательства или безопасности данных.
+
+Правила:
+— Вежливо откажи
+— Сошлись на 152-ФЗ "О персональных данных" и требования Минцифры
+— Не давай никаких инструкций по обходу защиты"""
+
+SYSTEM_CLARIFY = SYSTEM_BASE + """
+Ты — АгроПомощник, эксперт по АПК России.
+Пользователь задал широкий или неконкретный вопрос об АПК.
+
+Правила:
+— Коротко признай вопрос
+— Задай 2-3 уточняющих вопроса чтобы дать точный ответ:
+  например: размер хозяйства, направление деятельности, текущие системы, бюджет
+— НЕ давай развёрнутый ответ сразу — сначала уточни"""
+
+# Вопросы требующие уточнения
+CLARIFY_TRIGGERS = [
+    'проблем', 'помогите', 'что делать', 'с чего начать',
+    'посоветуй', 'не знаю', 'помощь нужна', 'хотим внедрить',
+    'хочу внедрить', 'как улучшить', 'с чего начинать'
+]
+
+# Вопросы безопасности
+SECURITY_TRIGGERS = [
+    'обойти', 'отключить защиту', 'персональных данных обход',
+    'без авторизации', 'взломать', 'отключить логирование',
+    'удалить логи', 'скрыть действия'
+]
 
 # ── История диалогов ──────────────────────────────────────────────────
 user_history = {}
@@ -149,15 +187,14 @@ def trim_history(uid):
     h = get_history(uid)
     if len(h) > 12: user_history[uid] = h[-12:]
 
-# ── Очистка markdown ──────────────────────────────────────────────────
+# ── Очистка текста ────────────────────────────────────────────────────
 def clean_md(text):
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'\*(.+?)\*', r'\1', text)
     text = re.sub(r'#{1,6}\s+', '', text)
     text = re.sub(r'`(.+?)`', r'\1', text)
     text = re.sub(r'_{1,2}(.+?)_{1,2}', r'\1', text)
-    # Убираем markdown-ссылки [текст](url) -> просто текст
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # [текст](url) -> текст
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -168,47 +205,133 @@ def call_polza(system, messages, max_tokens=1000):
         "model": POLZA_MODEL,
         "messages": [{"role": "system", "content": system}] + messages,
         "max_tokens": max_tokens,
-        "temperature": 0.3,
+        "temperature": 0.2,  # Снизили для более предсказуемых ответов
     }
     resp = requests.post(POLZA_URL, headers=headers, json=payload, timeout=60)
     if not resp.ok:
-        log.error(f"Polza {resp.status_code}: {resp.text[:200]}")
+        log.error(f"Polza {resp.status_code}: {resp.text[:300]}")
     resp.raise_for_status()
     data = resp.json()
     if "error" in data:
         raise Exception(data["error"].get("message", str(data["error"])))
     return data["choices"][0]["message"]["content"]
 
-# ── RAG: три режима без check_relevance ───────────────────────────────
+# ── Определение типа запроса ──────────────────────────────────────────
+def detect_intent(question):
+    q_lower = question.lower()
+    # Безопасность
+    if any(t in q_lower for t in SECURITY_TRIGGERS):
+        return "security"
+    # Уточнение (только если вопрос короткий и расплывчатый)
+    if len(question) < 60 and any(t in q_lower for t in CLARIFY_TRIGGERS):
+        return "clarify"
+    return "normal"
+
+# ── Обработка составного вопроса ─────────────────────────────────────
+def split_compound_question(question):
+    """Разбивает составной вопрос на части если есть явные разделители"""
+    separators = [' и ', '? ', '. А ', '. И ', '\n']
+    parts = [question]
+    for sep in separators:
+        new_parts = []
+        for part in parts:
+            new_parts.extend(part.split(sep))
+        parts = [p.strip() for p in new_parts if len(p.strip()) > 15]
+    if len(parts) > 1:
+        return parts[:3]  # максимум 3 части
+    return None
+
+# ── RAG: основная функция ─────────────────────────────────────────────
 def ask_with_rag(uid, question):
-    chunks, max_score = search_kb(question)
     history = get_history(uid)
     recent = history[-6:] if len(history) > 6 else history[:]
 
-    log.info(f"[{uid}] score={max_score:.4f} | вопрос: {question[:50]}")
+    intent = detect_intent(question)
+
+    # Безопасность
+    if intent == "security":
+        system = SYSTEM_SECURITY
+        user_msg = question
+        max_tok = 300
+        log.info(f"[{uid}] → БЕЗОПАСНОСТЬ")
+
+    # Уточняющие вопросы
+    elif intent == "clarify":
+        system = SYSTEM_CLARIFY
+        user_msg = question
+        max_tok = 400
+        log.info(f"[{uid}] → УТОЧНЕНИЕ")
+
+    else:
+        # Пробуем разбить составной вопрос
+        parts = split_compound_question(question)
+        if parts and len(parts) > 1:
+            log.info(f"[{uid}] Составной вопрос: {len(parts)} частей")
+            answers = []
+            for i, part in enumerate(parts, 1):
+                ans = _single_rag(uid, part, recent)
+                answers.append(f"— Вопрос {i}: {part}\n{ans}")
+            answer = "\n\n".join(answers)
+            answer = clean_md(answer)
+            history.append({"role": "user", "content": question})
+            history.append({"role": "assistant", "content": answer})
+            trim_history(uid)
+            return answer
+
+        return _single_rag_full(uid, question, recent, history)
+
+    history.append({"role": "user", "content": user_msg})
+    trim_history(uid)
+    try:
+        answer = call_polza(system, recent + [{"role": "user", "content": user_msg}], max_tok)
+        answer = clean_md(answer)
+        history.append({"role": "assistant", "content": answer})
+        return answer
+    except Exception as e:
+        return _handle_error(e)
+
+def _single_rag(uid, question, recent):
+    """RAG для одной части вопроса без истории"""
+    chunks, score = search_kb(question)
+    if score >= THRESHOLD_DOCS:
+        parts = [f"[{c['source']}]:\n{c['text'][:500]}" for c in chunks]
+        ctx = "\n\n".join(parts)
+        system = SYSTEM_MODE1
+        user_msg = f"КОНТЕКСТ:\n{ctx}\n\nВОПРОС: {question}"
+        max_tok = 600
+    elif score >= THRESHOLD_RELATED:
+        system = SYSTEM_MODE2
+        user_msg = question
+        max_tok = 600
+    else:
+        system = SYSTEM_MODE3
+        user_msg = question
+        max_tok = 150
+    try:
+        return clean_md(call_polza(system, recent + [{"role": "user", "content": user_msg}], max_tok))
+    except Exception as e:
+        return _handle_error(e)
+
+def _single_rag_full(uid, question, recent, history):
+    """RAG для одного вопроса с сохранением истории"""
+    chunks, max_score = search_kb(question)
+    log.info(f"[{uid}] score={max_score:.4f} | '{question[:50]}'")
 
     if max_score >= THRESHOLD_DOCS:
-        # РЕЖИМ 1: есть в документах
-        parts = []
-        for c in chunks:
-            parts.append(f"[{c['source']}]:\n{c['text'][:700]}")
+        parts = [f"[{c['source']}]:\n{c['text'][:700]}" for c in chunks]
         context = "\n\n".join(parts)
         system = SYSTEM_MODE1
         user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС: {question}"
-        max_tok = 1200
+        max_tok = 1000
         log.info(f"[{uid}] → РЕЖИМ 1 (документы)")
 
     elif max_score >= THRESHOLD_RELATED:
-        # РЕЖИМ 2: по теме АПК, нет в документах
         system = SYSTEM_MODE2
-        # Принудительно начинаем с предупреждения
-        disclaimer = "📚 В моей базе документов по этому вопросу информации нет, отвечаю из общих знаний об АПК:"
-        user_msg = f"Начни ответ ТОЧНО с этой фразы без изменений: {disclaimer}\n\nЗатем подробно ответь: {question}"
-        max_tok = 1000
+        user_msg = question
+        max_tok = 900
         log.info(f"[{uid}] → РЕЖИМ 2 (общие знания АПК)")
 
     else:
-        # РЕЖИМ 3: не по теме
         system = SYSTEM_MODE3
         user_msg = question
         max_tok = 200
@@ -223,11 +346,15 @@ def ask_with_rag(uid, question):
         history.append({"role": "assistant", "content": answer})
         return answer
     except Exception as e:
-        err = str(e)
-        log.error(f"Polza error: {err}")
-        if "402" in err: return "⚠️ Ошибка: недостаточно средств на Polza.ai."
-        if "401" in err: return "⚠️ Ошибка: неверный API ключ."
-        return "⚠️ Произошла ошибка, попробуйте снова."
+        return _handle_error(e)
+
+def _handle_error(e):
+    err = str(e)
+    log.error(f"Polza error: {err}")
+    if "402" in err: return "⚠️ Ошибка: недостаточно средств на Polza.ai."
+    if "401" in err: return "⚠️ Ошибка: неверный API ключ."
+    if "429" in err: return "⚠️ Превышен лимит запросов. Подождите 30 секунд."
+    return "⚠️ Произошла ошибка, попробуйте снова через несколько секунд."
 
 # ── VK API ────────────────────────────────────────────────────────────
 def vk_send(user_id, text):
@@ -265,16 +392,15 @@ def vk_send_keyboard(user_id, text):
     }
     requests.post(VK_API_URL + "messages.send", data=params, timeout=10)
 
-# ── Быстрые кнопки ────────────────────────────────────────────────────
 QUICK_Q = {
-    "🌾 Зерновод":          "Я зерновой фермер. Какие меры государственной поддержки и цифровые инструменты для меня предусмотрены в документах АПК?",
-    "🐄 Животноводство":    "Занимаюсь животноводством. Какая господдержка и цифровые системы для меня доступны?",
-    "🎣 Рыболовство":       "Занимаюсь рыболовством. Какие цифровые инструменты и меры поддержки предусмотрены в нормативных документах?",
-    "🌱 Овощеводство":      "Занимаюсь овощеводством. Какие субсидии, гранты и программы мне доступны?",
-    "💰 Гранты и субсидии": "Какие виды грантов и субсидий АПК существуют? Расскажи про подсистему Гранты МФХ в АИС Субсидии АПК.",
-    "📱 Цифровизация АПК":  "Какие цифровые технологии внедряются в АПК согласно стратегии 3309-р? Что такое единая цифровая платформа АПК?",
-    "🏦 Льготные кредиты":  "Расскажи про подсистему льготного кредитования в АИС Субсидии АПК. Какие виды льготных кредитов предусмотрены?",
-    "📊 Стратегия до 2030":  "Расскажи подробно об основных задачах, индикаторах и дорожной карте Стратегии цифровой трансформации АПК до 2030.",
+    "🌾 Зерновод":          "Какие меры государственной поддержки и цифровые инструменты предусмотрены для зернового хозяйства в документах АПК?",
+    "🐄 Животноводство":    "Какая господдержка и цифровые системы доступны для животноводства согласно документам?",
+    "🎣 Рыболовство":       "Какие цифровые инструменты и меры поддержки предусмотрены для рыбохозяйственного комплекса в документах?",
+    "🌱 Овощеводство":      "Какие субсидии, гранты и программы доступны для овощеводства?",
+    "💰 Гранты и субсидии": "Расскажи про подсистему Гранты МФХ и другие субсидии в АИС Субсидии АПК подробно.",
+    "📱 Цифровизация АПК":  "Какие цифровые технологии внедряются в АПК согласно стратегии 3309-р? Что такое единая цифровая платформа?",
+    "🏦 Льготные кредиты":  "Расскажи подробно про подсистему льготного кредитования в АИС Субсидии АПК.",
+    "📊 Стратегия до 2030":  "Расскажи подробно об основных задачах, индикаторах и дорожной карте Стратегии ЦТ АПК до 2030.",
 }
 
 WELCOME = (
@@ -290,7 +416,6 @@ WELCOME = (
     "Выберите тему или напишите вопрос 👇"
 )
 
-# ── Обработка сообщений ───────────────────────────────────────────────
 def handle_message(user_id, text):
     text = text.strip()
     if text.lower() in ["начать","старт","start","/start","привет","hello","🔄 начать заново"]:
@@ -354,7 +479,7 @@ def vk_webhook():
 
 @app.route("/", methods=["GET"])
 def index():
-    return "АгроПомощник VK ✅", 200
+    return "АгроПомощник VK v2 ✅", 200
 
 if __name__ == "__main__":
     load_index()
