@@ -82,7 +82,7 @@ def tokenize(text):
 THRESHOLD_DOCS    = 0.12
 THRESHOLD_RELATED = 0.015
 
-def search_kb(query, n=6):
+def search_kb(query, n=8):  # было 6 → стало 8
     if not INDEX["chunks"]: return [], 0.0
     words = tokenize(query)
     if not words: return [], 0.0
@@ -205,7 +205,7 @@ def call_polza(system, messages, max_tokens=1000):
         "model": POLZA_MODEL,
         "messages": [{"role": "system", "content": system}] + messages,
         "max_tokens": max_tokens,
-        "temperature": 0.2,  # Снизили для более предсказуемых ответов
+        "temperature": 0.2,
     }
     resp = requests.post(POLZA_URL, headers=headers, json=payload, timeout=60)
     if not resp.ok:
@@ -219,10 +219,8 @@ def call_polza(system, messages, max_tokens=1000):
 # ── Определение типа запроса ──────────────────────────────────────────
 def detect_intent(question):
     q_lower = question.lower()
-    # Безопасность
     if any(t in q_lower for t in SECURITY_TRIGGERS):
         return "security"
-    # Уточнение (только если вопрос короткий и расплывчатый)
     if len(question) < 60 and any(t in q_lower for t in CLARIFY_TRIGGERS):
         return "clarify"
     return "normal"
@@ -238,13 +236,13 @@ def split_compound_question(question):
             new_parts.extend(part.split(sep))
         parts = [p.strip() for p in new_parts if len(p.strip()) > 15]
     if len(parts) > 1:
-        return parts[:3]  # максимум 3 части
+        return parts[:3]
     return None
 
 # ── RAG: основная функция ─────────────────────────────────────────────
 def ask_with_rag(uid, question):
     history = get_history(uid)
-    recent = history[-6:] if len(history) > 6 else history[:]
+    recent = history[-2:] if len(history) > 2 else history[:]  # было 6 → стало 2
 
     intent = detect_intent(question)
 
@@ -294,7 +292,7 @@ def _single_rag(uid, question, recent):
     """RAG для одной части вопроса без истории"""
     chunks, score = search_kb(question)
     if score >= THRESHOLD_DOCS:
-        parts = [f"[{c['source']}]:\n{c['text'][:500]}" for c in chunks]
+        parts = [f"[{c['source']}]:\n{c['text'][:500]}" for c in chunks]  # было 700 → 500
         ctx = "\n\n".join(parts)
         system = SYSTEM_MODE1
         user_msg = f"КОНТЕКСТ:\n{ctx}\n\nВОПРОС: {question}"
@@ -318,11 +316,11 @@ def _single_rag_full(uid, question, recent, history):
     log.info(f"[{uid}] score={max_score:.4f} | '{question[:50]}'")
 
     if max_score >= THRESHOLD_DOCS:
-        parts = [f"[{c['source']}]:\n{c['text'][:700]}" for c in chunks]
+        parts = [f"[{c['source']}]:\n{c['text'][:500]}" for c in chunks]  # было 700 → 500
         context = "\n\n".join(parts)
         system = SYSTEM_MODE1
         user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС: {question}"
-        max_tok = 1000
+        max_tok = 1300  # было 1000 → 1300
         log.info(f"[{uid}] → РЕЖИМ 1 (документы)")
 
     elif max_score >= THRESHOLD_RELATED:
@@ -357,6 +355,19 @@ def _handle_error(e):
     return "⚠️ Произошла ошибка, попробуйте снова через несколько секунд."
 
 # ── VK API ────────────────────────────────────────────────────────────
+def vk_typing(user_id):
+    """Показывает 'печатает...' в VK пока бот думает"""
+    params = {
+        "user_id": user_id,
+        "type": "typing",
+        "access_token": VK_TOKEN,
+        "v": VK_API_VER,
+    }
+    try:
+        requests.post(VK_API_URL + "messages.setActivity", data=params, timeout=5)
+    except:
+        pass
+
 def vk_send(user_id, text):
     import random
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
@@ -423,9 +434,11 @@ def handle_message(user_id, text):
         vk_send_keyboard(user_id, WELCOME)
         return
     if text in QUICK_Q:
+        vk_typing(user_id)
         answer = ask_with_rag(user_id, QUICK_Q[text])
         vk_send(user_id, answer)
         return
+    vk_typing(user_id)
     answer = ask_with_rag(user_id, text)
     vk_send(user_id, answer)
 
@@ -479,7 +492,7 @@ def vk_webhook():
 
 @app.route("/", methods=["GET"])
 def index():
-    return "АгроПомощник VK v2 ✅", 200
+    return "АгроПомощник VK ✅", 200
 
 if __name__ == "__main__":
     load_index()
