@@ -79,7 +79,7 @@ def tokenize(text):
     text = re.sub(r'^што\b', 'что', text)
     return [w for w in re.findall(r'[а-яёa-z]{3,}', text) if w not in STOPWORDS]
 
-THRESHOLD_DOCS    = 0.12
+THRESHOLD_DOCS    = 0.11
 THRESHOLD_RELATED = 0.015
 
 def search_kb(query, n=8):  # было 6 → стало 8
@@ -251,7 +251,7 @@ def split_compound_question(question):
     return None
 
 # ── RAG: основная функция ─────────────────────────────────────────────
-def ask_with_rag(uid, question):
+def ask_with_rag(uid, question, is_button=False):
     history = get_history(uid)
     recent = history[-2:] if len(history) > 2 else history[:]  # было 6 → стало 2
 
@@ -294,8 +294,8 @@ def ask_with_rag(uid, question):
         log.info(f"[{uid}] → УТОЧНЕНИЕ")
 
     else:
-        # Пробуем разбить составной вопрос
-        parts = split_compound_question(question)
+        # Пробуем разбить составной вопрос (не для кнопок меню)
+        parts = None if is_button else split_compound_question(question)
         if parts and len(parts) > 1:
             log.info(f"[{uid}] Составной вопрос: {len(parts)} частей")
             answers = []
@@ -353,13 +353,13 @@ def _single_rag_full(uid, question, recent, history):
         context = "\n\n".join(parts)
         system = SYSTEM_MODE1
         user_msg = f"КОНТЕКСТ ИЗ ДОКУМЕНТОВ:\n{context}\n\nВОПРОС: {question}"
-        max_tok = 1300  # было 1000 → 1300
+        max_tok = 1100
         log.info(f"[{uid}] → РЕЖИМ 1 (документы)")
 
     elif max_score >= THRESHOLD_RELATED:
         system = SYSTEM_MODE2
         user_msg = question
-        max_tok = 900
+        max_tok = 700
         log.info(f"[{uid}] → РЕЖИМ 2 (общие знания АПК)")
 
     else:
@@ -477,7 +477,8 @@ def handle_message(user_id, text):
         t = threading.Thread(target=vk_typing_loop, args=(user_id, stop), daemon=True)
         t.start()
         try:
-            answer = ask_with_rag(user_id, QUICK_Q[text])
+            # Кнопки не разбиваем на составные вопросы — is_button=True
+            answer = ask_with_rag(user_id, QUICK_Q[text], is_button=True)
         finally:
             stop.set()
         vk_send(user_id, answer)
