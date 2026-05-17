@@ -6,7 +6,7 @@ bot_vk.py — ВКонтакте бот «АгроПомощник»
   РЕЖИМ 3 (score < 0.015) — не по теме, кратко
 """
 import os, logging, re, math, pickle, requests, json
-import json as _json, time as _time
+import json as _json, time as _time, threading
 from pathlib import Path as _Path
 
 # ── Загрузка .env ─────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ def _handle_error(e):
 
 # ── VK API ────────────────────────────────────────────────────────────
 def vk_typing(user_id):
-    """Показывает 'печатает...' в VK пока бот думает"""
+    """Отправляет один сигнал 'печатает...' (держится ~10 сек)"""
     params = {
         "user_id": user_id,
         "type": "typing",
@@ -400,6 +400,12 @@ def vk_typing(user_id):
         requests.post(VK_API_URL + "messages.setActivity", data=params, timeout=5)
     except:
         pass
+
+def vk_typing_loop(user_id, stop_event):
+    """Повторяет 'печатает...' каждые 8 сек пока бот думает"""
+    while not stop_event.is_set():
+        vk_typing(user_id)
+        stop_event.wait(8)
 
 def vk_send(user_id, text):
     import random
@@ -467,12 +473,22 @@ def handle_message(user_id, text):
         vk_send_keyboard(user_id, WELCOME)
         return
     if text in QUICK_Q:
-        vk_typing(user_id)
-        answer = ask_with_rag(user_id, QUICK_Q[text])
+        stop = threading.Event()
+        t = threading.Thread(target=vk_typing_loop, args=(user_id, stop), daemon=True)
+        t.start()
+        try:
+            answer = ask_with_rag(user_id, QUICK_Q[text])
+        finally:
+            stop.set()
         vk_send(user_id, answer)
         return
-    vk_typing(user_id)
-    answer = ask_with_rag(user_id, text)
+    stop = threading.Event()
+    t = threading.Thread(target=vk_typing_loop, args=(user_id, stop), daemon=True)
+    t.start()
+    try:
+        answer = ask_with_rag(user_id, text)
+    finally:
+        stop.set()
     vk_send(user_id, answer)
 
 # ── Flask Webhook ─────────────────────────────────────────────────────
